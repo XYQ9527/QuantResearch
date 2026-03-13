@@ -23,54 +23,54 @@ TOKEN_PATH = os.path.join(ROOT_DIR, "config", "tushare_token.txt")
 
 
 # ================================================================== #
-#  数据库路径
+#  数据库路径   datas/quant_data.db
 # ================================================================== #
 
-DB_PATH = os.path.join(ROOT_DIR, "datapipeline", "quant_data.db")
+DB_PATH = os.path.join(ROOT_DIR, "datas", "quant_data.db")
 
 
 # ================================================================== #
-#  原始 Parquet 层   datapipeline/parquet/
+#  原始 Parquet 层   datas/parquet/
 #  结构：{表名}/ts_code=xxx/part-0.parquet
 # ================================================================== #
 
-PARQUET_ROOT = os.path.join(ROOT_DIR, "datapipeline", "parquet")
+PARQUET_ROOT = os.path.join(ROOT_DIR, "datas", "parquet")
 
-DAILY_DIR    = os.path.join(PARQUET_ROOT, "daily")        # 日线行情
-ADJ_DIR      = os.path.join(PARQUET_ROOT, "adj_factor")   # 复权因子
-BASIC_DIR    = os.path.join(PARQUET_ROOT, "daily_basic")  # 每日指标
-INDEX_DIR    = os.path.join(PARQUET_ROOT, "index_daily")  # 指数日线（新增）
+DAILY_DIR   = os.path.join(PARQUET_ROOT, "daily")       # 日线行情
+ADJ_DIR     = os.path.join(PARQUET_ROOT, "adj_factor")  # 复权因子
+BASIC_DIR   = os.path.join(PARQUET_ROOT, "daily_basic") # 每日指标
+INDEX_DIR   = os.path.join(PARQUET_ROOT, "index_daily") # 指数日线
 
-REPORT_PATH  = os.path.join(PARQUET_ROOT, "三表校核.csv")
+REPORT_PATH = os.path.join(PARQUET_ROOT, "四表校核.csv")
 
 
 # ================================================================== #
-#  因子层   datapipeline/factor/
+#  因子层   datas/factor/
 #  三层递进：宽表 → 技术指标 → 形态信号
 # ================================================================== #
 
-FACTOR_ROOT = os.path.join(ROOT_DIR, "datapipeline", "factor")
+FACTOR_ROOT = os.path.join(ROOT_DIR, "datas", "factor")
 
-WIDE_DIR    = os.path.join(FACTOR_ROOT, "wide")     # build_wide_table.py 输出
-FACTORS_DIR = os.path.join(FACTOR_ROOT, "factors")  # compute_factors.py  输出
-SIGNALS_DIR = os.path.join(FACTOR_ROOT, "signals")  # generate_signals.py 输出
+WIDE_DIR    = os.path.join(FACTOR_ROOT, "step1_wide")    # build_wide_table.py 输出
+FACTORS_DIR = os.path.join(FACTOR_ROOT, "step2_factors") # compute_factors.py  输出
+SIGNALS_DIR = os.path.join(FACTOR_ROOT, "step3_signals") # generate_signals.py 输出
 
 
 # ================================================================== #
-#  Qlib 目录   my_cn_data/
+#  Qlib 目录   qlib_data/
 # ================================================================== #
 
-QLIB_DIR  = os.path.join(ROOT_DIR, "my_cn_data")
+QLIB_DIR  = os.path.join(ROOT_DIR, "qlib_data")
 QLIB_CAL  = os.path.join(QLIB_DIR, "calendars")
 QLIB_INST = os.path.join(QLIB_DIR, "instruments")
 QLIB_FEAT = os.path.join(QLIB_DIR, "features")
 
 
 # ================================================================== #
-#  回测输出目录
+#  回测输出目录   backtest/
 # ================================================================== #
 
-BACKTEST_DIR = os.path.join(ROOT_DIR, "datapipeline", "backtest")
+BACKTEST_DIR = os.path.join(ROOT_DIR, "backtest")
 
 
 # ================================================================== #
@@ -88,11 +88,11 @@ BACKTEST_DIR = os.path.join(ROOT_DIR, "datapipeline", "backtest")
 # ================================================================== #
 
 INDEX_LIST = [
-    ("000001.SH", "上证指数"),   # 市场整体情绪
-    ("399001.SZ", "深证成指"),   # 深市情绪
-    ("000300.SH", "沪深300"),    # 大盘参考基准
-    ("000852.SH", "中证1000"),   # ★ 主基准，与持仓风格匹配
-    ("399006.SZ", "创业板指"),   # 成长股风向标
+    ("000001.SH", "上证指数"),  # 市场整体情绪
+    ("399001.SZ", "深证成指"),  # 深市情绪
+    ("000300.SH", "沪深300"),   # 大盘参考基准
+    ("000852.SH", "中证1000"),  # ★ 主基准，与持仓小市值风格匹配
+    ("399006.SZ", "创业板指"),  # 成长股风向标
 ]
 
 
@@ -119,7 +119,7 @@ TABLE_CONFIG = {
         "output_dir": "daily_basic",
     },
 
-    # ── 指数日线（新增）──────────────────────────────────────────
+    # ── 指数日线 ──────────────────────────────────────────────────
     # 按 ts_code 分区存储，结构与股票表一致
     # 无需复权，直接存原始点位
     "index_daily": {

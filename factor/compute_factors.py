@@ -1,10 +1,10 @@
 """
-因子计算模块 factors_compute.py
+因子计算模块 compute_factors.py
 
-从宽表读取数据，用 TA-Lib 计算技术指标，结果存入 step2_factors_table
+从宽表读取数据，用 TA-Lib 计算技术指标，结果存入 step2_factors
 
-输入：datapipeline/factor/step1_wide_table/ts_code=xxx/
-输出：datapipeline/factor/step2_factors_table/ts_code=xxx/
+输入：data/factor/step1_wide/ts_code=xxx/
+输出：data/factor/step2_factors/ts_code=xxx/
 
 技术指标：
     MACD        macd_dif / macd_dea / macd_bar       (12, 26, 9)
@@ -16,29 +16,32 @@
     波动率       atr_14
 """
 import os
+import sys
 import time
 import logging
 import warnings
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (
-    DAILY_DIR, ADJ_DIR, BASIC_DIR,
-    WIDE_DIR, FACTORS_DIR, SIGNALS_DIR, REPORT_PATH,
-)
+import numpy          as np
+import pandas         as pd
+import pyarrow        as pa
+import pyarrow.parquet as pq
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import WIDE_DIR, FACTORS_DIR
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
+
+# ================================================================== #
+#  字段配置
+# ================================================================== #
+
 # 读宽表时排除原始未复权 OHLCV，其余全部保留
 DROP_COLS = {'open', 'high', 'low', 'close', 'vol'}
 
-# 新增技术指标字段
+# 新增技术指标字段（用于验证列数）
 INDICATOR_COLS = [
     'macd_dif', 'macd_dea', 'macd_bar',
     'kdj_k',    'kdj_d',    'kdj_j',
@@ -50,22 +53,22 @@ INDICATOR_COLS = [
 ]
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  技术指标计算
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     用 TA-Lib 计算全部技术指标，追加到 df
 
-    输入 df 必须包含：adj_close / adj_high / adj_low / adj_vol
+    输入 df 必须包含：adj_close / adj_high / adj_low
     全部使用前复权价格，确保与交易软件对齐
     """
     import talib
 
-    close  = df['adj_close'].values.astype(np.float64)
-    high   = df['adj_high'].values.astype(np.float64)
-    low    = df['adj_low'].values.astype(np.float64)
+    close = df['adj_close'].values.astype(np.float64)
+    high  = df['adj_high'].values.astype(np.float64)
+    low   = df['adj_low'].values.astype(np.float64)
 
     # ── MACD (12, 26, 9) ──────────────────────────────────────────
     macd_dif, macd_dea, macd_bar = talib.MACD(
@@ -73,7 +76,7 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     )
     df['macd_dif'] = macd_dif
     df['macd_dea'] = macd_dea
-    df['macd_bar'] = macd_bar * 2  # ×2 对齐通达信/同花顺显示标准
+    df['macd_bar'] = macd_bar * 2   # ×2 对齐通达信/同花顺显示标准
 
     # ── KDJ (9, 3, 3) ─────────────────────────────────────────────
     # TA-Lib STOCH：slowk=K, slowd=D，对应通达信/同花顺标准 KDJ
@@ -99,7 +102,7 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ── 动量：N 日收益率 ──────────────────────────────────────────
-    # pct_change(n) = (今日 - N日前) / N日前，向前看 N 天
+    # pct_change(n) = (今日 - N日前) / N日前
     df['mom_5']  = df['adj_close'].pct_change(5).round(6)
     df['mom_10'] = df['adj_close'].pct_change(10).round(6)
     df['mom_20'] = df['adj_close'].pct_change(20).round(6)
@@ -116,9 +119,9 @@ def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  单只股票处理
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def _process_single(ts_code: str) -> dict:
     """
@@ -130,10 +133,14 @@ def _process_single(ts_code: str) -> dict:
     result = {'ts_code': ts_code, 'status': 'PASS', 'note': ''}
 
     try:
+        wide_path = os.path.join(WIDE_DIR, f'ts_code={ts_code}')
+
         # ── 读宽表，排除法过滤字段 ────────────────────────────────
-        wide_path  = os.path.join(WIDE_DIR, f'ts_code={ts_code}')
-        all_cols   = pq.read_table(wide_path).schema.names
-        read_cols  = [c for c in all_cols if c not in DROP_COLS]
+        # 用 read_schema 只读元数据，避免两次完整 IO
+        all_cols  = pq.read_schema(
+            os.path.join(wide_path, 'part-0.parquet')
+        ).names
+        read_cols = [c for c in all_cols if c not in DROP_COLS]
 
         df = pq.read_table(wide_path, columns=read_cols).to_pandas()
 
@@ -146,8 +153,8 @@ def _process_single(ts_code: str) -> dict:
         df['trade_date'] = pd.to_datetime(df['trade_date'])
         df = df.sort_values('trade_date').reset_index(drop=True)
 
-        # ── 数据量检查（MACD 需要至少 26 行）────────────────────
-        if len(df) < 30:
+        # ── 数据量检查（ma_60 需要至少 60 行）───────────────────
+        if len(df) < 60:
             result['status'] = 'SKIP'
             result['note']   = f'数据量不足({len(df)}行)'
             return result
@@ -173,21 +180,20 @@ def _process_single(ts_code: str) -> dict:
     return result
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  主流程
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def run(max_workers: int = 20):
     t0 = time.time()
 
     logger.info('=' * 60)
-    logger.info('因子计算开始 factors_compute.py')
+    logger.info('因子计算开始 compute_factors.py')
     logger.info(f'输入：{WIDE_DIR}')
     logger.info(f'输出：{FACTORS_DIR}')
-    logger.info(f'指标：MACD / KDJ / RSI / BOLL / MOM / MA / ATR')
+    logger.info('指标：MACD / KDJ / RSI / BOLL / MOM / MA / ATR')
     logger.info('=' * 60)
 
-    # 扫描宽表目录
     all_codes = sorted([
         f.replace('ts_code=', '')
         for f in os.listdir(WIDE_DIR)
@@ -258,14 +264,14 @@ def run(max_workers: int = 20):
         logger.warning(f'验证失败：{e}')
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  调试入口
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 if __name__ == '__main__':
     logging.basicConfig(
-        level   = logging.INFO,
-        format  = '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt = '%H:%M:%S',
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
     )
     run(max_workers=20)

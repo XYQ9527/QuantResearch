@@ -1,11 +1,11 @@
 """
-信号构建模块 signal_builder.py
+信号构建模块 generate_signals.py
 
-基于因子层（step2_factors_table）构造策略形态信号（0/1）
-结果存入 step3_signals_table
+基于因子层（step2_factors）构造策略形态信号（0/1）
+结果存入 step3_signals
 
-输入：datapipeline/factor/step2_factors_table/ts_code=xxx/
-输出：datapipeline/factor/step3_signals_table/ts_code=xxx/
+输入：data/factor/step2_factors/ts_code=xxx/
+输出：data/factor/step3_signals/ts_code=xxx/
 
 信号定义：
 
@@ -13,7 +13,7 @@
                   最近3天内任意一天满足：
                     今天 K > D（金叉发生）
                     昨天 K < D（刚刚发生，排除已金叉多日）
-                    K <= 24 且 D <= 24（严格低位）
+                    K <= 35 且 D <= 35（严格低位）
 
     rsi_new_low   RSI近期触底
                   近5日RSI最低点 <= 近10日RSI最低点
@@ -21,54 +21,54 @@
 
     macd_shrink   MACD负值缩量
                   连续3天递增 且 当天值 < 0.1（允许轻微转正）
-                  还原原始逻辑：macd[-3] < macd[-2] < macd[-1] < 0.1
+                  即：macd[-3] < macd[-2] < macd[-1] < 0.1
 
-信号参数（来自原始策略网格搜索优选组）：
-    KDJ_THRESH   = 24
+信号参数（网格搜索优选组）：
+    KDJ_THRESH   = 35
     KDJ_WINDOW   = 3
     RSI_SHORT    = 5
     RSI_LOOKBACK = 5
     MACD_UPPER   = 0.1
     MACD_DAYS    = 3
 """
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os
+import sys
 import time
 import logging
 import warnings
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from config import (
-    DAILY_DIR, ADJ_DIR, BASIC_DIR,
-    WIDE_DIR, FACTORS_DIR, SIGNALS_DIR, REPORT_PATH,
-)
+
+import numpy          as np
+import pandas         as pd
+import pyarrow        as pa
+import pyarrow.parquet as pq
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import FACTORS_DIR, SIGNALS_DIR
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------ #
+
+# ================================================================== #
 #  信号参数
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
-KDJ_THRESH   = 35     # K 和 D 都必须 <= 此值（严格低位）
-KDJ_WINDOW   = 3      # 金叉窗口：最近N天内任意一天触发即标记为1
+KDJ_THRESH   = 35    # K 和 D 都必须 <= 此值（低位）
+KDJ_WINDOW   = 3     # 金叉窗口：最近N天内任意一天触发即标记为1
 
-RSI_SHORT    = 5      # 近期窗口（天）
-RSI_LOOKBACK = 5      # 额外回溯（总窗口 = SHORT + LOOKBACK = 10天）
+RSI_SHORT    = 5     # 近期窗口（天）
+RSI_LOOKBACK = 5     # 额外回溯（总窗口 = SHORT + LOOKBACK = 10天）
 
-MACD_UPPER   = 0.1    # MACD柱当天值必须 < 此值
-MACD_DAYS    = 3      # 连续递增天数
+MACD_UPPER   = 0.1   # MACD柱当天值必须 < 此值
+MACD_DAYS    = 3     # 连续递增天数
 
-SIGNAL_COLS  = ['kdj_cross', 'rsi_new_low', 'macd_shrink']
-MIN_ROWS     = 80     # 最少行数（ma_60 需要60行，留一定余量）
+MIN_ROWS     = 80    # 最少行数（留足指标预热期）
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  信号计算
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def calc_signals(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -81,16 +81,16 @@ def calc_signals(df: pd.DataFrame) -> pd.DataFrame:
     # ── KDJ 低位金叉 ─────────────────────────────────────────────
     # 今天 K > D（金叉）
     # 昨天 K < D（刚刚发生，排除已金叉多日）
-    # K <= KDJ_THRESH 且 D <= KDJ_THRESH（严格低位）
+    # K <= KDJ_THRESH 且 D <= KDJ_THRESH（低位）
     # 3天滚动窗口：最近KDJ_WINDOW天内任意一天触发即标记为1
     k = df['kdj_k']
     d = df['kdj_d']
 
     cross_today = (
-        (k > d)                     &   # 今天金叉
-        (k.shift(1) < d.shift(1))   &   # 昨天还是死叉
-        (k <= KDJ_THRESH)           &   # K 在低位
-        (d <= KDJ_THRESH)               # D 在低位
+        (k > d)                   &   # 今天金叉
+        (k.shift(1) < d.shift(1)) &   # 昨天还是死叉
+        (k <= KDJ_THRESH)         &   # K 在低位
+        (d <= KDJ_THRESH)             # D 在低位
     )
     df['kdj_cross'] = (
         cross_today
@@ -103,7 +103,6 @@ def calc_signals(df: pd.DataFrame) -> pd.DataFrame:
     # ── RSI 近期触底 ──────────────────────────────────────────────
     # 近5日RSI最低点 <= 近10日RSI最低点
     # 即：最低点出现在最近5天内，而不是更早之前
-    # 参数来源：网格搜索主流区间 rsi_period=5~15，rsi_lookback=2~5
     rsi         = df['rsi_6']
     long_window = RSI_SHORT + RSI_LOOKBACK   # 10天
 
@@ -117,9 +116,8 @@ def calc_signals(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # ── MACD 负值缩量 ─────────────────────────────────────────────
-    # 严格还原原始逻辑：
-    #   macd_bar[-3] < macd_bar[-2] < macd_bar[-1] < 0.1
-    #   连续3天递增（负值区柱子在收缩）且当天值 < 0.1
+    # macd_bar[-3] < macd_bar[-2] < macd_bar[-1] < 0.1
+    # 连续3天递增（负值区柱子在收缩）且当天值 < 0.1
     bar  = df['macd_bar']
     cond = bar < MACD_UPPER
     for i in range(1, MACD_DAYS):
@@ -130,17 +128,11 @@ def calc_signals(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  单只股票处理
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def _process_single(ts_code: str) -> dict:
-    """
-    处理单只股票：
-        1. 读因子层数据（step2_factors_table）
-        2. 计算三个形态信号
-        3. 写出 signals parquet（保留全部列）
-    """
     result = {'ts_code': ts_code, 'status': 'PASS', 'note': ''}
 
     try:
@@ -201,15 +193,15 @@ def _process_single(ts_code: str) -> dict:
     return result
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  主流程
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def run(max_workers: int = 20):
     t0 = time.time()
 
     logger.info('=' * 65)
-    logger.info('信号构建开始 signal_builder.py')
+    logger.info('信号构建开始 generate_signals.py')
     logger.info(f'输入：{FACTORS_DIR}')
     logger.info(f'输出：{SIGNALS_DIR}')
     logger.info('信号参数：')
@@ -218,7 +210,6 @@ def run(max_workers: int = 20):
     logger.info(f'  macd_shrink 连续{MACD_DAYS}天递增 且 当天 < {MACD_UPPER}')
     logger.info('=' * 65)
 
-    # 扫描因子目录
     all_codes = sorted([
         f.replace('ts_code=', '')
         for f in os.listdir(FACTORS_DIR)
@@ -306,14 +297,14 @@ def run(max_workers: int = 20):
         logger.warning(f'验证失败：{e}')
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  调试入口
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 if __name__ == '__main__':
     logging.basicConfig(
-        level   = logging.INFO,
-        format  = '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt = '%H:%M:%S',
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S',
     )
     run(max_workers=20)

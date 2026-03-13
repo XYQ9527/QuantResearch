@@ -1,49 +1,45 @@
 """
-数据校核模块
+数据校核模块 check_data.py
 
-三层校核，任何一层有问题直接 DROP，删除对应 parquet 文件夹。
-只有三层全部通过的股票才保留，目录天然干净供 builder.py 使用。
+针对股票三张核心表执行三层校核，任何一层有问题直接 DROP。
+只有三层全部通过的股票才保留，目录天然干净供 build_wide_table.py 使用。
 
-第一层：存在性校核   → 三张表是否都有对应文件夹
-第二层：日期对齐校核  → daily 有的每一天，adj_factor 和 daily_basic 必须都有
-第三层：数值合理性校核 → 收盘价为正，复权因子在合理范围，总市值为正
+注：index_daily 是独立的市场基准表，不参与校核。
+
+第一层：存在性校核    三张表是否都有对应文件夹
+第二层：日期对齐校核  daily 有的每一天，adj_factor 和 daily_basic 必须都有
+第三层：数值合理性校核 收盘价为正，复权因子在合理范围，总市值为正
 
 输出：
-    validation_report.csv → 问题股票明细（原因记录在 note 列）
-    DROP 股票的文件夹直接删除，builder.py 扫目录即可
+    四表校核.csv  → 问题股票明细（原因记录在 note 列）
+    DROP 股票的 parquet 文件夹直接删除，build_wide_table.py 扫目录即可
 """
-import logging
 import os
+import sys
+import logging
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 加了这三行
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import pandas as pd
+import pandas          as pd
 import pyarrow.parquet as pq
 
-from config import (
-    DAILY_DIR, ADJ_DIR, BASIC_DIR,
-    REPORT_PATH,
-)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import DAILY_DIR, ADJ_DIR, BASIC_DIR, REPORT_PATH
 
 logger = logging.getLogger(__name__)
 
 # 三张表统一管理，存在性校核和 DROP 删除时都用这里
 ALL_DIRS = {
-    'daily': DAILY_DIR,
+    'daily':      DAILY_DIR,
     'adj_factor': ADJ_DIR,
     'daily_basic': BASIC_DIR,
 }
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  第二层 + 第三层：单只股票校核
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def _validate_single(ts_code: str) -> dict:
     """
@@ -60,17 +56,17 @@ def _validate_single(ts_code: str) -> dict:
         pe_ttm / dv_ttm 等允许为 NULL 的字段不做校核
     """
     result = {
-        'ts_code': ts_code,
-        'daily_days': 0,
-        'adj_days': 0,
-        'basic_days': 0,
-        'missing_in_adj': 0,
+        'ts_code':          ts_code,
+        'daily_days':       0,
+        'adj_days':         0,
+        'basic_days':       0,
+        'missing_in_adj':   0,
         'missing_in_basic': 0,
-        'price_anomaly': 0,
-        'factor_anomaly': 0,
-        'mv_anomaly': 0,
-        'status': 'PASS',
-        'note': '',
+        'price_anomaly':    0,
+        'factor_anomaly':   0,
+        'mv_anomaly':       0,
+        'status':           'PASS',
+        'note':             '',
     }
 
     try:
@@ -91,11 +87,11 @@ def _validate_single(ts_code: str) -> dict:
         ).to_pandas()
 
         daily_dates = set(df_daily['trade_date'])
-        adj_dates = set(df_adj['trade_date'])
+        adj_dates   = set(df_adj['trade_date'])
         basic_dates = set(df_basic['trade_date'])
 
         result['daily_days'] = len(daily_dates)
-        result['adj_days'] = len(adj_dates)
+        result['adj_days']   = len(adj_dates)
         result['basic_days'] = len(basic_dates)
 
         problems = []
@@ -134,20 +130,20 @@ def _validate_single(ts_code: str) -> dict:
         # ── 综合判定 ──────────────────────────────────────────────
         if problems:
             result['status'] = 'DROP'
-            result['note'] = '；'.join(problems)
+            result['note']   = '；'.join(problems)
         else:
             result['note'] = '完全对齐'
 
     except Exception as e:
         result['status'] = 'DROP'
-        result['note'] = f'读取失败: {e}'
+        result['note']   = f'读取失败: {e}'
 
     return result
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  主校核入口
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 def run_validation(max_workers: int = 20) -> list:
     """
@@ -174,25 +170,33 @@ def run_validation(max_workers: int = 20) -> list:
         logger.info(f"  {name}: {len(code_sets[name])} 只")
 
     # 三张表都有才进入下一层校核
-    all_three = code_sets['daily'] & code_sets['adj_factor'] & code_sets['daily_basic']
-    all_codes = code_sets['daily'] | code_sets['adj_factor'] | code_sets['daily_basic']
+    all_three = (
+        code_sets['daily'] &
+        code_sets['adj_factor'] &
+        code_sets['daily_basic']
+    )
+    all_codes = (
+        code_sets['daily'] |
+        code_sets['adj_factor'] |
+        code_sets['daily_basic']
+    )
 
     # 缺任意一张表的股票直接 DROP
     drop_records = []
     for code in all_codes - all_three:
         missing_tables = [name for name, s in code_sets.items() if code not in s]
         drop_records.append({
-            'ts_code': code,
-            'daily_days': -1,
-            'adj_days': -1,
-            'basic_days': -1,
-            'missing_in_adj': -1,
+            'ts_code':          code,
+            'daily_days':       -1,
+            'adj_days':         -1,
+            'basic_days':       -1,
+            'missing_in_adj':   -1,
             'missing_in_basic': -1,
-            'price_anomaly': 0,
-            'factor_anomaly': 0,
-            'mv_anomaly': 0,
-            'status': 'DROP',
-            'note': f"缺少表：{', '.join(missing_tables)}",
+            'price_anomaly':    0,
+            'factor_anomaly':   0,
+            'mv_anomaly':       0,
+            'status':           'DROP',
+            'note':             f"缺少表：{', '.join(missing_tables)}",
         })
 
     logger.info(
@@ -204,9 +208,9 @@ def run_validation(max_workers: int = 20) -> list:
     logger.info("第二层 + 第三层：日期对齐 + 数值合理性校核...")
     logger.info(f"  并发线程数: {max_workers} | 待校核: {len(all_three)} 只")
 
-    results = []
+    results   = []
     completed = 0
-    total = len(all_three)
+    total     = len(all_three)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_code = {
@@ -226,9 +230,9 @@ def run_validation(max_workers: int = 20) -> list:
                 )
 
     # ── 汇总结果 ──────────────────────────────────────────────────
-    report_df = pd.DataFrame(results + drop_records)
-    pass_df = report_df[report_df['status'] == 'PASS']
-    drop_df = report_df[report_df['status'] == 'DROP']
+    report_df   = pd.DataFrame(results + drop_records)
+    pass_df     = report_df[report_df['status'] == 'PASS']
+    drop_df     = report_df[report_df['status'] == 'DROP']
     valid_codes = sorted(pass_df['ts_code'].tolist())
 
     # ── 删除 DROP 股票的文件夹 ────────────────────────────────────
@@ -272,15 +276,15 @@ def run_validation(max_workers: int = 20) -> list:
     return valid_codes
 
 
-# ------------------------------------------------------------------ #
-#  供 builder.py 调用：直接扫目录
-# ------------------------------------------------------------------ #
+# ================================================================== #
+#  供 build_wide_table.py 调用：直接扫目录
+# ================================================================== #
 
 def get_valid_codes() -> list:
     """
     返回当前 daily 目录下所有股票代码
 
-    validator 运行后问题股票文件夹已删除，目录天然干净，
+    校核运行后问题股票文件夹已删除，目录天然干净，
     直接扫目录即可，无需读额外的列表文件。
     """
     codes = sorted([
@@ -292,9 +296,9 @@ def get_valid_codes() -> list:
     return codes
 
 
-# ------------------------------------------------------------------ #
+# ================================================================== #
 #  调试入口
-# ------------------------------------------------------------------ #
+# ================================================================== #
 
 if __name__ == '__main__':
     logging.basicConfig(
